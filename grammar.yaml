@@ -1,0 +1,18 @@
+symbols:
+  terminal:
+    - number
+    - operator_plus
+    - $
+  non_terminal:
+    - expression
+    - term
+
+start:
+  - expression
+
+rules:
+  expression:
+    - ['expression', 'operator_plus', 'term']
+    - ['term']
+  term:
+    - [number]
