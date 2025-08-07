@@ -17,23 +17,23 @@ struct Grammar {
     rules: HashMap<String, Vec<Vec<String>>>,
 }
 
-struct ExtensionData {
-    symbol: String,
-    lookahead: String,
+struct ExtensionData<'a> {
+    symbol: &'a str,
+    lookahead: &'a str,
 }
 
 // TODO optimizable by separating the position? idk
 // TODO some of this fields could be references
 #[derive(Clone, Hash, Eq, PartialEq)]
-struct Item {
-    symbol: String,
-    derivation: Vec<String>,
+struct Item<'a> {
+    symbol: &'a str,
+    derivation: &'a Vec<String>,
     position: usize,
-    lookahead: String,
+    lookahead: &'a str,
 }
 
-impl Item {
-    fn new(symbol: String, derivation: Vec<String>, lookahead: String) -> Self {
+impl<'a> Item<'a> {
+    fn new(symbol: &'a str, derivation: &'a Vec<String>, lookahead: &'a str) -> Self {
         Item {
             symbol,
             derivation,
@@ -42,7 +42,7 @@ impl Item {
         }
     }
 
-    fn extended_lookahead(&self, symbols: &Symbols) -> Option<ExtensionData> {
+    fn extended_lookahead(&self, symbols: &'a Symbols) -> Option<ExtensionData<'a>> {
         let next_symbol = match self.derivation.get(self.position) {
             Some(symbol) => symbol,
             None => return None,
@@ -52,17 +52,17 @@ impl Item {
             return None;
         }
 
-        let mut terminal_symbols: Vec<String> = Vec::new();
+        let mut terminal_symbols: Vec<&str> = Vec::new();
         for symbol in self.derivation[self.position + 1..].iter() {
             if symbols.terminal.contains(symbol) {
-                terminal_symbols.push(symbol.clone());
+                terminal_symbols.push(symbol);
             }
         }
 
-        terminal_symbols.push(self.lookahead.clone());
+        terminal_symbols.push(self.lookahead);
         return Some(ExtensionData {
-            symbol: next_symbol.clone(),
-            lookahead: terminal_symbols.first().unwrap().clone(),
+            symbol: next_symbol,
+            lookahead: terminal_symbols.first().unwrap(),
         });
     }
 
@@ -73,12 +73,12 @@ impl Item {
     }
 }
 
-struct State {
+struct State<'a> {
     index: usize,
-    set: HashSet<Item>,
+    set: HashSet<Item<'a>>,
 }
 
-impl State {
+impl<'a> State<'a> {
     fn print(&self) {
         println!("state {}", self.index);
         for item in self.set.iter() {
@@ -111,7 +111,7 @@ fn main() {
     ));
 
     let grammar: Grammar = serde_yaml::from_str(&grammar_yaml).expect("Bad grammar");
-    let start_item = Item::new("S".to_string(), grammar.start, "$".to_string());
+    let start_item = Item::new("S", &grammar.start, "$");
 
     let mut state_stack: Vec<State> = Vec::from([State {
         index: 0,
@@ -134,16 +134,16 @@ fn main() {
                     None => continue,
                 };
 
-                let matches = match grammar.rules.get(&extension_data.symbol) {
+                let matches = match grammar.rules.get(extension_data.symbol) {
                     Some(rules) => rules,
                     None => continue, // TODO idk
                 };
 
                 for rule in matches {
                     let new_item = Item::new(
-                        extension_data.symbol.clone(),
-                        rule.clone(),
-                        extension_data.lookahead.clone(),
+                        extension_data.symbol,
+                        rule,
+                        extension_data.lookahead,
                     );
 
                     if state.set.contains(&new_item) {
