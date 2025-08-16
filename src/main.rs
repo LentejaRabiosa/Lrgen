@@ -1,9 +1,7 @@
-// WARNING: Este algoritmo prioriza la verticalidad y legibilidad del codigo frente al rendimiento.
-
 use serde::Deserialize;
 use std::{
     collections::{HashMap, HashSet},
-    env, fs, process::exit,
+    env, fs,
 };
 
 #[derive(Debug, Deserialize)]
@@ -26,7 +24,7 @@ struct ExtensionData<'a> {
 
 #[derive(Hash, Eq, PartialEq)]
 enum Action {
-    Shift,
+    Shift(usize),
     Reduce,
     Goto(usize),
     Accept,
@@ -48,14 +46,6 @@ struct Item<'a> {
     derivation: &'a Vec<String>,
     position: usize,
     lookahead: &'a str,
-}
-
-impl<'a> From<&Item<'a>> for Item<'a> {
-    fn from(item: &Item<'a>) -> Self {
-        let mut new_item = item.clone();
-        new_item.position += 1;
-        new_item
-    }
 }
 
 impl<'a> Item<'a> {
@@ -107,44 +97,17 @@ struct State<'a> {
 
 impl<'a> State<'a> {
     fn print(&self) {
-        println!("state {}", self.index);
+        println!("\nstate {}", self.index);
         for item in self.set.iter() {
             item.print();
         }
     }
 }
 
-fn close_items<'a>(to_close: &HashSet<Item<'a>>, set: &HashSet<Item>, grammar: &'a Grammar) -> HashSet<Item<'a>> {
-    let mut new_items: HashSet<Item> = HashSet::new();
-    for item in to_close {
-        let extension_data = match item.extended_lookahead(&grammar.symbols) {
-            Some(symbol) => symbol,
-            None => continue,
-        };
-
-        let matches = match grammar.rules.get(extension_data.symbol) {
-            Some(rules) => rules,
-            None => continue, // TODO idk
-        };
-
-        for rule in matches {
-            let new_item = Item::new(extension_data.symbol, rule, extension_data.lookahead);
-
-            if set.contains(&new_item) {
-                continue;
-            }
-
-            new_items.insert(new_item);
-        }
-    }
-
-    new_items
-}
-
 fn print_actions(actions: &Vec<HashMap<&str, Action>>) {
-    println!("ACTIONS");
+    println!("\nACTIONS");
     for (index, map) in actions.iter().enumerate() {
-        println!("state {}", index);
+        println!("\nstate {}", index);
         for (symbol, action) in map {
             println!("{} -> {}", symbol, action.text());
         }
@@ -178,52 +141,52 @@ fn main() {
         set: HashSet::from([start_item]),
     }]);
 
-    loop {
-        let mut state = match state_stack.pop() {
-            Some(state) => state,
-            None => break,
-        };
-
-        let mut to_close = state.set.clone();
-        loop {
-            let new_items = close_items(&to_close, &state.set, &grammar);
-            if new_items.is_empty() {
-                break;
-            }
-
-            to_close = new_items.clone();
-            state.set.extend(new_items);
-        }
-
-        state.print();
-
-        // TODO refactor
+    let mut index = 0;
+    while let Some(mut state) = state_stack.pop() {
+        let mut to_close: Vec<Item> = state.set.iter().cloned().collect();
         let mut new_actions: HashMap<&str, Action> = HashMap::new();
         let mut new_states: HashMap<&str, State> = HashMap::new();
-        let mut index = state.index;
-        for item in &state.set {
-            let next_symbol = match item.derivation.get(item.position) {
-                Some(symbol) => symbol.as_str(),
-                None => continue, // some action
-            };
 
-            if grammar.symbols.non_terminal.contains(next_symbol) {
-                if let Some(new_state) = new_states.get_mut(next_symbol) {
-                    new_state.set.insert(Item::from(item));
+        while let Some(item) = to_close.pop() {
+            // process item
+            if let Some(next_symbol) = item.derivation.get(item.position) {
+                let mut new_item = item.clone();
+                new_item.position += 1;
+
+                if let Some(new_state) = new_states.get_mut(next_symbol.as_str()) {
+                    new_state.set.insert(new_item);
                 } else {
                     index += 1;
                     let new_state = State {
                         index,
-                        set: HashSet::from([Item::from(item)]),
+                        set: HashSet::from([new_item]),
                     };
                     new_states.insert(next_symbol, new_state);
+                }
+
+                if grammar.symbols.non_terminal.contains(next_symbol) {
                     new_actions.insert(next_symbol, Action::Goto(index));
+                } else {
+                    new_actions.insert(next_symbol, Action::Shift(index));
+                }
+            }
+
+            // extend item
+            if let Some(extension) = item.extended_lookahead(&grammar.symbols) {
+                if let Some(rules) = grammar.rules.get(extension.symbol) {
+                    for rule in rules {
+                        let new_item = Item::new(extension.symbol, rule, extension.lookahead);
+                        if state.set.insert(new_item.clone()) {
+                            to_close.push(new_item);
+                        }
+                    }
                 }
             }
         }
 
         actions.push(new_actions);
         state_stack.extend(new_states.values().cloned());
+        state.print();
     }
 
     print_actions(&actions);
