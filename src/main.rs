@@ -37,7 +37,7 @@ impl Action {
             Action::Goto(state) => format!("Goto({})", state),
             Action::Shift(state) => format!("Shift({})", state),
             Action::Reduce => format!("Reduce"),
-            _ => "None".to_string(),
+            Action::Accept => format!("Accept"),
         }
     }
 }
@@ -122,6 +122,25 @@ fn print_actions(actions: &Vec<HashMap<&str, Action>>) {
     }
 }
 
+fn close_items<'a>(mut items: BTreeSet<Item<'a>>, grammar: &'a Grammar) -> BTreeSet<Item<'a>> {
+    let mut to_close: Vec<Item> = items.iter().cloned().collect();
+
+    while let Some(item) = to_close.pop() {
+        if let Some(extension) = item.extended_lookahead(&grammar.symbols) {
+            if let Some(rules) = grammar.rules.get(extension.symbol) {
+                for rule in rules {
+                    let new_item = Item::new(extension.symbol, rule, extension.lookahead);
+                    if items.insert(new_item.clone()) {
+                        to_close.push(new_item);
+                    }
+                }
+            }
+        }
+    }
+
+    items
+}
+
 fn main() {
     println!("LR(1) Table Generator");
 
@@ -138,29 +157,14 @@ fn main() {
     ));
 
     let grammar: Grammar = serde_yaml::from_str(&grammar_yaml).expect("Bad grammar");
-    let start_item = Item::new("'", &grammar.start, "$");
+    let mut start_item = Item::new("'", &grammar.start, "$");
+    let first_state = close_items(BTreeSet::from([start_item.clone()]), &grammar);
 
     let mut actions: Vec<HashMap<&str, Action>> = Vec::new();
     let mut states: HashMap<BTreeSet<Item>, usize> = HashMap::new();
-    let mut states_stack: VecDeque<BTreeSet<Item>> = VecDeque::from([BTreeSet::from([start_item])]);
+    let mut states_stack: VecDeque<BTreeSet<Item>> = VecDeque::from([first_state]);
 
-    while let Some(mut state) = states_stack.pop_front() {
-        let mut to_close: Vec<Item> = state.iter().cloned().collect(); // can't be reference :(
-
-        // close state
-        while let Some(item) = to_close.pop() {
-            if let Some(extension) = item.extended_lookahead(&grammar.symbols) {
-                if let Some(rules) = grammar.rules.get(extension.symbol) {
-                    for rule in rules {
-                        let new_item = Item::new(extension.symbol, rule, extension.lookahead);
-                        if state.insert(new_item.clone()) {
-                            to_close.push(new_item);
-                        }
-                    }
-                }
-            }
-        }
-
+    while let Some(state) = states_stack.pop_front() {
         // process state
         let mut new_states: HashMap<&str, BTreeSet<Item>> = HashMap::new();
         let mut new_actions: HashMap<&str, Action> = HashMap::new();
@@ -175,7 +179,12 @@ fn main() {
                     new_states.insert(next_symbol, new_state);
                 }
             } else {
-                new_actions.insert(item.lookahead, Action::Reduce);
+                start_item.position = start_item.derivation.len();
+                if state.contains(&start_item) && item.lookahead == "$" {
+                    new_actions.insert(item.lookahead, Action::Accept);
+                } else {
+                    new_actions.insert(item.lookahead, Action::Reduce);
+                }
             }
         }
 
@@ -184,7 +193,8 @@ fn main() {
             states.insert(state, states.len());
         }
 
-        for (symbol, state) in new_states {
+        for (symbol, mut state) in new_states {
+            state = close_items(state, &grammar);
             let index = match states.get(&state) {
                 Some(existing_state) => *existing_state,
                 None => {
