@@ -1,18 +1,8 @@
-symbols:
-  terminal:
-    - number
-    - operator_plus
-    - $
-  non_terminal:
-    - expression
-    - term
-
-start:
-  - expression
+start: 'EXPRESSION'
 
 rules:
-  expression:
-    - ['expression', 'operator_plus', 'term']
-    - ['term']
-  term:
-    - [number]
+  EXPRESSION:
+    - ['EXPRESSION', 'plus', 'TERM']
+    - ['TERM']
+  TERM:
+    - ['number']
