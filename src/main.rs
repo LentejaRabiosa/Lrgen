@@ -166,7 +166,7 @@ impl Action {
 }
 
 #[derive(Clone, Hash, Eq, PartialEq, PartialOrd, Ord)]
-struct Item<'a> {
+struct Set<'a> {
     symbol: &'a str,
     derivation: &'a Vec<&'a str>,
     position: usize,
@@ -174,9 +174,9 @@ struct Item<'a> {
     rule: usize,
 }
 
-impl<'a> Item<'a> {
+impl<'a> Set<'a> {
     fn new(symbol: &'a str, derivation: &'a Vec<&'a str>, lookahead: &'a str, rule: usize) -> Self {
-        Item {
+        Set {
             symbol,
             derivation,
             position: 0,
@@ -185,7 +185,7 @@ impl<'a> Item<'a> {
         }
     }
 
-    fn advanced(&self) -> Item<'a> {
+    fn advanced(&self) -> Set<'a> {
         let mut new_item = self.clone();
         new_item.position += 1;
         new_item
@@ -227,7 +227,7 @@ impl<'a> Item<'a> {
     }
 }
 
-fn print_states(states: &HashMap<BTreeSet<Item>, usize>) {
+fn print_states(states: &HashMap<BTreeSet<Set>, usize>) {
     println!("\nSTATES");
     for (state, index) in states {
         println!(" * state {}", index);
@@ -248,15 +248,15 @@ fn print_actions(actions: &Vec<HashMap<&str, Action>>) {
     }
 }
 
-fn close_items<'a>(mut items: BTreeSet<Item<'a>>, symbols: &'a Symbols, grammar: &'a Grammar) -> BTreeSet<Item<'a>> {
-    let mut to_close: Vec<Item> = items.iter().cloned().collect();
+fn close_items<'a>(mut items: BTreeSet<Set<'a>>, symbols: &'a Symbols, grammar: &'a Grammar) -> BTreeSet<Set<'a>> {
+    let mut to_close: Vec<Set> = items.iter().cloned().collect();
 
     while let Some(item) = to_close.pop() {
         if let Some(extension) = item.extended_lookahead(symbols) {
             if let Some(rules) = grammar.rules.get(extension.symbol) {
                 for (index, derivation) in rules {
                     let new_item =
-                        Item::new(extension.symbol, derivation, extension.lookahead, *index);
+                        Set::new(extension.symbol, derivation, extension.lookahead, *index);
                     if items.insert(new_item.clone()) {
                         to_close.push(new_item);
                     }
@@ -311,19 +311,19 @@ fn main() {
     let grammar: Grammar = Grammar::from_raw_grammar_data(&raw_grammar_data, &symbols);
 
     let first_derivation = Vec::from([grammar.start.as_str()]);
-    let mut start_item = Item::new("'", &first_derivation, "$", 0);
-    let first_state = close_items(BTreeSet::from([start_item.clone()]), &symbols, &grammar);
+    let first_set = Set::new("'", &first_derivation, "$", 0);
+    let first_state = close_items(BTreeSet::from([first_set.clone()]), &symbols, &grammar);
 
     let mut actions: Vec<HashMap<&str, Action>> = Vec::new();
-    let mut states: HashMap<BTreeSet<Item>, usize> = HashMap::new();
-    let mut states_stack: VecDeque<BTreeSet<Item>> = VecDeque::from([first_state]);
+    let mut states: HashMap<BTreeSet<Set>, usize> = HashMap::new(); // TODO set reference as key
+    let mut states_stack: VecDeque<BTreeSet<Set>> = VecDeque::from([first_state]);
 
     // let mut symbols_enum: Vec<&str> = Vec::from(["$"]);
     let mut yyr1: Vec<usize> = Vec::new();
     let mut yyr2: Vec<usize> = Vec::new();
-    let mut yydefact: Vec<usize> = Vec::new();
-    let mut yybase: Vec<usize> = Vec::new();
-    let mut yygoto: Vec<usize> = Vec::new();
+    // let mut yydefact: Vec<usize> = Vec::new();
+    // let mut yybase: Vec<usize> = Vec::new();
+    // let mut yygoto: Vec<usize> = Vec::new();
     let mut yytable: Vec<isize> = Vec::new();
     let mut yycheck: Vec<usize> = Vec::new();
 
@@ -337,45 +337,52 @@ fn main() {
     while let Some(state) = states_stack.pop_front() {
         let current_state_index = states.len();
 
-        // process state
-        let mut new_states: HashMap<&str, BTreeSet<Item>> = HashMap::new();
-        let mut new_actions: HashMap<&str, Action> = HashMap::new();
+        // create new states (not completed states)
+        let mut new_states: HashMap<&str, BTreeSet<Set>> = HashMap::new();
         for item in &state {
-            if let Some(next_symbol) = item.derivation.get(item.position) {
-                let new_item = item.advanced();
+            let next_symbol = match item.derivation.get(item.position) {
+                Some(symbol) => symbol,
+                None => continue,
+            };
 
-                if let Some(new_state) = new_states.get_mut(next_symbol) {
-                    new_state.insert(new_item);
-                } else {
-                    let new_state = BTreeSet::from([new_item]);
-                    new_states.insert(next_symbol, new_state);
-                }
+            let new_item = item.advanced();
+
+            if let Some(new_state) = new_states.get_mut(next_symbol) {
+                new_state.insert(new_item);
             } else {
-                start_item.position = start_item.derivation.len();
-                if state.contains(&start_item) && item.lookahead == "$" {
-                    new_actions.insert(item.lookahead, Action::Accept);
-                    yytable.push(0);
-                    yycheck.push(current_state_index);
-                } else {
-                    new_actions.insert(item.lookahead, Action::Reduce(item.rule));
-                    if let (Some(&last_yytable), Some(&last_yycheck)) = (yytable.last(), yycheck.last()) {
-                        if last_yytable != -(item.rule as isize) || last_yycheck != current_state_index {
-                            yytable.push(-(item.rule as isize));
-                            yycheck.push(current_state_index);
-                        }
-                    }
-                }
-
+                let new_state = BTreeSet::from([new_item]);
+                new_states.insert(next_symbol, new_state);
             }
+
+            // else {
+            //     start_item.position = start_item.derivation.len();
+            //     if state.contains(&start_item) && item.lookahead == "$" {
+            //         new_actions.insert(item.lookahead, Action::Accept);
+            //         yytable.push(0);
+            //         yycheck.push(current_state_index);
+            //     } else {
+            //         new_actions.insert(item.lookahead, Action::Reduce(item.rule));
+            //         if let (Some(&last_yytable), Some(&last_yycheck)) = (yytable.last(), yycheck.last()) {
+            //             if last_yytable != -(item.rule as isize) || last_yycheck != current_state_index {
+            //                 yytable.push(-(item.rule as isize));
+            //                 yycheck.push(current_state_index);
+            //             }
+            //         }
+            //     }
+            //
+            // }
         }
 
-        // insert states and actions
+        // insert the current state
         if !states.contains_key(&state) {
             states.insert(state, current_state_index);
         }
 
+        // create new actions
+        let mut new_actions: HashMap<&str, Action> = HashMap::new();
         for (symbol, mut state) in new_states {
             state = close_items(state, &symbols, &grammar);
+
             let index = match states.get(&state) {
                 Some(existing_state) => *existing_state,
                 None => {
