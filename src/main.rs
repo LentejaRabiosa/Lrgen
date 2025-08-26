@@ -1,421 +1,428 @@
-use clap::{Arg, Command, builder::styling};
-use serde::Deserialize;
 use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque}, fs, isize, u8, usize
+    collections::{BTreeMap, BTreeSet, HashMap},
+    env,
+    fs::File,
+    io::{BufRead, BufReader, Lines},
+    isize,
+    iter::Peekable,
+    str::Chars,
+    usize,
 };
 
-enum SymbolType {
-    Terminal,
-    NonTerminal,
-    Error,
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Symbol {
+    Terminal(String),
+    NonTerminal(String),
 }
 
-fn get_symbol_type(symbol: &str) -> SymbolType {
-    let mut uppercase: i8 = 0;
-    let mut lowercase: i8 = 0;
-
-    for ch in symbol.chars() {
-        if ch == '_' {
-            continue;
-        } else if ch.is_uppercase() {
-            uppercase += 1;
-        } else if ch.is_lowercase() {
-            lowercase += 1;
-        }
-    }
-
-    let diff = uppercase - lowercase;
-    if diff == uppercase {
-        return SymbolType::NonTerminal;
-    } else if diff == -lowercase {
-        return SymbolType::Terminal;
-    } else {
-        return SymbolType::Error;
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct Symbols {
-    terminals: HashSet<String>,
-    non_terminals: HashSet<String>,
-}
-
-impl Symbols {
-    fn from_raw_grammar_data(raw_grammar_data: &RawGrammarData) -> Self {
-        let mut symbols = Symbols {
-            terminals: HashSet::new(),
-            non_terminals: HashSet::new(),
-        };
-
-        for (symbol, rules) in &raw_grammar_data.rules {
-            symbols.add_symbol(symbol.to_string(), true);
-            for derivation in rules {
-                for symbol in derivation {
-                    symbols.add_symbol(symbol.to_string(), false);
-                }
-            }
-        }
-
-        symbols
-    }
-
-    // TODO refactor
-    fn add_symbol(&mut self, symbol: String, non_terminal_expected: bool) {
-        match (
-            self.terminals.contains(&symbol),
-            self.non_terminals.contains(&symbol),
-        ) {
-            (false, false) => {
-                match get_symbol_type(&symbol) {
-                    SymbolType::Terminal => {
-                        if non_terminal_expected {
-                            panic!("LHSs must be non terminal");
-                        }
-                        self.terminals.insert(symbol);
-                    }
-                    SymbolType::NonTerminal => {
-                        self.non_terminals.insert(symbol);
-                    }
-                    _ => panic!("bad symbol in the grammar"),
-                };
-            }
-            (true, true) => panic!("terminal and non terminal at the same time (not possible lol)"),
-            _ => {}
-        };
-    }
-
-    fn get_symbol(&self, symbol: String) -> &str {
-        match (self.terminals.get(&symbol), self.non_terminals.get(&symbol)) {
-            (Some(terminal), None) => terminal,
-            (None, Some(non_terminal)) => non_terminal,
-            _ => panic!("something went wrong adding those symbols"),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-struct RawGrammarData {
-    start: String,
-    rules: HashMap<String, Vec<Vec<String>>>,
-}
-
-#[derive(Debug)]
-struct Grammar<'a> {
-    start: String,
-    rules: HashMap<&'a str, Vec<(usize, Vec<&'a str>)>>,
-    number_of_rules: usize,
-}
-
-impl<'a> Grammar<'a> {
-    fn from_raw_grammar_data(raw_grammar_data: &RawGrammarData, symbols: &'a Symbols) -> Self {
-        let mut grammar = Grammar {
-            start: raw_grammar_data.start.to_string(),
-            rules: HashMap::new(),
-            number_of_rules: 0,
-        };
-
-        let mut flatten_rules: Vec<(&str, Vec<&str>)> = Vec::new();
-        for (symbol, rules) in &raw_grammar_data.rules {
-            let symbol_ref = symbols.get_symbol(symbol.to_string());
-            for derivation in rules {
-                let mut derivation_refs: Vec<&str> = Vec::new();
-                for symbol in derivation {
-                    derivation_refs.push(symbols.get_symbol(symbol.to_string()));
-                }
-                flatten_rules.push((symbol_ref, derivation_refs));
-            }
-        }
-
-        grammar.number_of_rules = flatten_rules.len();
-
-        for (index, (lhs, rhs)) in flatten_rules.into_iter().enumerate() {
-            if let Some(rules) = grammar.rules.get_mut(&lhs) {
-                rules.push((index + 1, rhs));
-            } else {
-                grammar.rules.insert(lhs, Vec::from([(index + 1, rhs)]));
-            }
-        }
-
-        grammar
-    }
-}
-
-struct ExtensionData<'a> {
-    symbol: &'a str,
-    lookahead: &'a str,
-}
-
-#[derive(Hash, Eq, PartialEq)]
-enum Action {
-    Shift(usize),
-    Reduce(usize),
-    Goto(usize),
-    Accept,
-    // None,
-}
-
-impl Action {
-    fn text(&self) -> String {
+impl Symbol {
+    fn get_type(&self) -> bool {
         match self {
-            Action::Goto(state) => format!("Goto({})", state),
-            Action::Shift(state) => format!("Shift({})", state),
-            Action::Reduce(state) => format!("Reduce({})", state),
-            Action::Accept => format!("Accept"),
+            Symbol::Terminal(_) => true,
+            Symbol::NonTerminal(_) => false,
         }
     }
+
+    // fn print(&self) {
+    //     match self {
+    //         Symbol::Terminal(symbol) => println!("terminal({symbol})"),
+    //         Symbol::NonTerminal(symbol) => println!("non_terminal({symbol})"),
+    //     }
+    // }
 }
 
-#[derive(Clone, Hash, Eq, PartialEq, PartialOrd, Ord)]
-struct Set<'a> {
-    symbol: &'a str,
-    derivation: &'a Vec<&'a str>,
+fn parse_symbol(chars: &mut Peekable<Chars>) -> Result<Symbol, ()> {
+    let mut symbol = String::new();
+
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_whitespace() {
+            if !symbol.is_empty() {
+                break;
+            }
+
+            continue;
+        }
+
+        symbol.push(ch);
+    }
+
+    if !symbol.is_empty() {
+        if symbol.chars().all(|ch| ch.is_ascii_uppercase()) {
+            return Ok(Symbol::NonTerminal(symbol));
+        } else if symbol.chars().all(|ch| ch.is_ascii_lowercase()) {
+            return Ok(Symbol::Terminal(symbol));
+        } else {
+            eprintln!("error: bad symbol");
+        }
+    }
+
+    Err(())
+}
+
+#[derive(Hash, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Rule {
+    rhs: Vec<usize>,
+    rule_number: usize,
+}
+
+struct Extension {
+    symbol: usize,
+    lookahead: usize,
+}
+
+#[derive(Hash, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Item<'a> {
+    lhr: usize,
+    rule: &'a Rule,
+    lookahead: usize,
     position: usize,
-    lookahead: &'a str,
-    rule: usize,
 }
 
-impl<'a> Set<'a> {
-    fn new(symbol: &'a str, derivation: &'a Vec<&'a str>, lookahead: &'a str, rule: usize) -> Self {
-        Set {
-            symbol,
-            derivation,
-            position: 0,
-            lookahead,
-            rule,
-        }
-    }
-
-    fn advanced(&self) -> Set<'a> {
+impl<'a> Item<'a> {
+    fn advance(&self) -> Self {
         let mut new_item = self.clone();
         new_item.position += 1;
         new_item
     }
 
-    fn extended_lookahead(&self, symbols: &'a Symbols) -> Option<ExtensionData<'a>> {
-        let &next_symbol = match self.derivation.get(self.position) {
-            Some(symbol) => symbol,
-            None => return None,
-        };
+    fn next_symbol(&self) -> Option<usize> {
+        self.rule.rhs.get(self.position).copied()
+    }
 
-        if !symbols.non_terminals.contains(next_symbol) {
-            return None;
-        }
+    fn extended_lookahead(&self, terminals: &Vec<bool>) -> Option<Extension> {
+        if let Some(next_symbol) = self.next_symbol() {
+            if terminals[next_symbol] {
+                // TODO this is wrong because the queue might include non terminals
+                let mut terminals_queue: Vec<&usize> =
+                    self.rule.rhs[self.position + 1..].iter().collect();
+                terminals_queue.push(&self.lookahead);
 
-        let mut terminal_symbols: Vec<&str> = Vec::new();
-        for &symbol in self.derivation[self.position + 1..].iter() {
-            if symbols.terminals.contains(symbol) {
-                terminal_symbols.push(symbol);
+                return Some(Extension {
+                    symbol: next_symbol,
+                    lookahead: **terminals_queue.first().unwrap(),
+                });
             }
         }
 
-        terminal_symbols.push(self.lookahead);
-        return Some(ExtensionData {
-            symbol: next_symbol,
-            lookahead: terminal_symbols.first().unwrap(),
-        });
-    }
-
-    fn print(&self) {
-        let mut symbols = self.derivation.clone();
-        symbols.insert(self.position, "·");
-        println!(
-            "[{} -> {}, {}]",
-            self.symbol,
-            symbols.join(" "),
-            self.lookahead
-        );
+        None
     }
 }
 
-fn print_states(states: &HashMap<BTreeSet<Set>, usize>) {
-    println!("\nSTATES");
-    for (state, index) in states {
-        println!(" * state {}", index);
-        for item in state {
-            print!("   ");
-            item.print();
+#[derive(Debug)]
+struct Grammar {
+    symbols_type: Vec<bool>, // true -> terminal, false -> non terminal
+    symbols: BTreeMap<Symbol, usize>,
+    rules: BTreeMap<usize, Vec<Rule>>,
+    rules_number: usize,
+}
+
+impl Grammar {
+    fn print_rules(&self) {
+        println!("RULES");
+        for (lhs, rules) in &self.rules {
+            for rule in rules {
+                print!("{lhs} >");
+                for symbol in &rule.rhs {
+                    print!(" {symbol}");
+                }
+                println!();
+            }
         }
     }
-}
 
-fn print_actions(actions: &Vec<HashMap<&str, Action>>) {
-    println!("\nACTIONS");
-    for (index, map) in actions.iter().enumerate() {
-        println!(" * state {}", index);
-        for (symbol, action) in map {
-            println!("   {} -> {}", symbol, action.text());
+    fn new(mut lines: Lines<BufReader<File>>) -> Result<Self, ()> {
+        let mut grammar = Grammar {
+            symbols_type: Vec::new(),
+            symbols: BTreeMap::new(),
+            rules: BTreeMap::new(),
+            rules_number: 0,
+        };
+
+        while let Some(Ok(line)) = lines.next() {
+            let mut chars = line.chars().peekable();
+
+            let lhs = match parse_symbol(&mut chars) {
+                Ok(symbol) => symbol,
+                Err(_) => return Err(()),
+            };
+
+            if let Symbol::Terminal(_) = lhs {
+                eprintln!("error: expected non terminal");
+                return Err(());
+            }
+
+            let arrow = parse_arrow(&mut chars);
+            if !arrow {
+                eprintln!("error: missing arrow after lhs");
+                return Err(());
+            }
+
+            let mut rhs: Vec<Symbol> = Vec::new();
+            while let Ok(symbol) = parse_symbol(&mut chars) {
+                rhs.push(symbol);
+            }
+
+            if rhs.is_empty() {
+                eprintln!("error: expected rhs");
+                return Err(());
+            }
+
+            // println!("{:?}", lhs);
+            // println!("{}", arrow);
+            // println!("{:?}", rhs);
+
+            if !grammar.symbols.contains_key(&lhs) {
+                grammar.symbols_type.push(lhs.get_type());
+                grammar.symbols.insert(lhs.clone(), grammar.symbols.len());
+            }
+
+            let lhs_index = *grammar.symbols.get(&lhs).unwrap();
+            let rules = match grammar.rules.get_mut(&lhs_index) {
+                Some(rules) => rules,
+                None => {
+                    grammar.rules.insert(lhs_index, Vec::new());
+                    grammar.rules.get_mut(&lhs_index).unwrap()
+                }
+            };
+
+            let mut rhs_indexes: Vec<usize> = Vec::new();
+            for symbol in rhs {
+                if !grammar.symbols.contains_key(&symbol) {
+                    grammar.symbols_type.push(symbol.get_type());
+                    grammar
+                        .symbols
+                        .insert(symbol.clone(), grammar.symbols.len());
+                }
+
+                rhs_indexes.push(*grammar.symbols.get(&symbol).unwrap());
+            }
+
+            rules.push(Rule {
+                rhs: rhs_indexes,
+                rule_number: grammar.rules_number,
+            });
+            grammar.rules_number += 1;
         }
+
+        Ok(grammar)
     }
-}
 
-fn close_items<'a>(mut items: BTreeSet<Set<'a>>, symbols: &'a Symbols, grammar: &'a Grammar) -> BTreeSet<Set<'a>> {
-    let mut to_close: Vec<Set> = items.iter().cloned().collect();
+    fn closure<'a>(&'a self, mut set: BTreeSet<Item<'a>>) -> BTreeSet<Item<'a>> {
+        let mut to_close: Vec<Item> = set.iter().cloned().collect();
 
-    while let Some(item) = to_close.pop() {
-        if let Some(extension) = item.extended_lookahead(symbols) {
-            if let Some(rules) = grammar.rules.get(extension.symbol) {
-                for (index, derivation) in rules {
-                    let new_item =
-                        Set::new(extension.symbol, derivation, extension.lookahead, *index);
-                    if items.insert(new_item.clone()) {
-                        to_close.push(new_item);
+        while let Some(item) = to_close.pop() {
+            if let Some(extension) = item.extended_lookahead(&self.symbols_type) {
+                if let Some(rules) = self.rules.get(&extension.symbol) {
+                    for rule in rules {
+                        let new_item = Item {
+                            lhr: extension.symbol,
+                            rule,
+                            lookahead: extension.lookahead,
+                            position: 0,
+                        };
+
+                        if set.insert(new_item.clone()) {
+                            to_close.push(new_item);
+                        }
                     }
                 }
             }
         }
+
+        set
     }
 
-    items
-}
+    fn successors<'a>(&self, set: &BTreeSet<Item<'a>>) -> HashMap<usize, BTreeSet<Item<'a>>> {
+        let mut new_states: HashMap<usize, BTreeSet<Item>> = HashMap::new();
 
-// TODO refactor
-fn main() {
-    // println!("LR(1) Table Generator");
-
-    const STYLES: styling::Styles = styling::Styles::styled()
-        .header(styling::AnsiColor::Green.on_default().bold())
-        .usage(styling::AnsiColor::Green.on_default().bold())
-        .literal(styling::AnsiColor::Blue.on_default().bold())
-        .placeholder(styling::AnsiColor::Cyan.on_default());
-
-    let mut args = Command::new("lrgen")
-        .author("Alejandro")
-        .about("LR(1) Table Generator")
-        .arg(Arg::new("grammar").help("YAML file").required(true))
-        .arg(
-            Arg::new("output")
-                .help("Output file")
-                .short('o')
-                .long("output")
-                .require_equals(true),
-        )
-        .styles(STYLES);
-
-    // TODO context
-    let grammar_file_error = args.error(clap::error::ErrorKind::ValueValidation, "bad file name");
-    // grammar_file_error.insert(clap::error::ContextKind::InvalidValue, clap::error::ContextValue::String("grammar".to_owned()));
-
-    let matches = args.get_matches();
-
-    let grammar_file = matches
-        .get_one::<String>("grammar")
-        .expect("something went wrong :(");
-    let grammar_yaml = match fs::read_to_string(&grammar_file) {
-        Ok(data) => data,
-        Err(_) => grammar_file_error.exit(),
-    };
-
-    let raw_grammar_data: RawGrammarData =
-        serde_yaml::from_str(&grammar_yaml).expect("Bad grammar");
-    let symbols = Symbols::from_raw_grammar_data(&raw_grammar_data);
-    let grammar: Grammar = Grammar::from_raw_grammar_data(&raw_grammar_data, &symbols);
-
-    let first_derivation = Vec::from([grammar.start.as_str()]);
-    let first_set = Set::new("'", &first_derivation, "$", 0);
-    let first_state = close_items(BTreeSet::from([first_set.clone()]), &symbols, &grammar);
-
-    let mut actions: Vec<HashMap<&str, Action>> = Vec::new();
-    let mut states: HashMap<BTreeSet<Set>, usize> = HashMap::new(); // TODO set reference as key
-    let mut states_stack: VecDeque<BTreeSet<Set>> = VecDeque::from([first_state]);
-
-    // let mut symbols_enum: Vec<&str> = Vec::from(["$"]);
-    let mut yyr1: Vec<usize> = Vec::new();
-    let mut yyr2: Vec<usize> = Vec::new();
-    // let mut yydefact: Vec<usize> = Vec::new();
-    // let mut yybase: Vec<usize> = Vec::new();
-    // let mut yygoto: Vec<usize> = Vec::new();
-    let mut yytable: Vec<isize> = Vec::new();
-    let mut yycheck: Vec<usize> = Vec::new();
-
-    for (lhs_number, (_, derivations)) in grammar.rules.iter().enumerate() {
-        for (_, rhs) in derivations {
-            yyr1.push(lhs_number);
-            yyr2.push(rhs.len());
-        }
-    }
-
-    while let Some(state) = states_stack.pop_front() {
-        let current_state_index = states.len();
-
-        // create new states (not completed states)
-        let mut new_states: HashMap<&str, BTreeSet<Set>> = HashMap::new();
-        for item in &state {
-            let next_symbol = match item.derivation.get(item.position) {
+        for item in set {
+            let next_symbol = match item.next_symbol() {
                 Some(symbol) => symbol,
                 None => continue,
             };
 
-            let new_item = item.advanced();
-
-            if let Some(new_state) = new_states.get_mut(next_symbol) {
+            let new_item = item.advance();
+            if let Some(new_state) = new_states.get_mut(&next_symbol) {
                 new_state.insert(new_item);
             } else {
-                let new_state = BTreeSet::from([new_item]);
-                new_states.insert(next_symbol, new_state);
+                new_states.insert(next_symbol, BTreeSet::from([new_item]));
             }
-
-            // else {
-            //     start_item.position = start_item.derivation.len();
-            //     if state.contains(&start_item) && item.lookahead == "$" {
-            //         new_actions.insert(item.lookahead, Action::Accept);
-            //         yytable.push(0);
-            //         yycheck.push(current_state_index);
-            //     } else {
-            //         new_actions.insert(item.lookahead, Action::Reduce(item.rule));
-            //         if let (Some(&last_yytable), Some(&last_yycheck)) = (yytable.last(), yycheck.last()) {
-            //             if last_yytable != -(item.rule as isize) || last_yycheck != current_state_index {
-            //                 yytable.push(-(item.rule as isize));
-            //                 yycheck.push(current_state_index);
-            //             }
-            //         }
-            //     }
-            //
-            // }
         }
 
-        // insert the current state
-        if !states.contains_key(&state) {
-            states.insert(state, current_state_index);
-        }
-
-        // create new actions
-        let mut new_actions: HashMap<&str, Action> = HashMap::new();
-        for (symbol, mut state) in new_states {
-            state = close_items(state, &symbols, &grammar);
-
-            let index = match states.get(&state) {
-                Some(existing_state) => *existing_state,
-                None => {
-                    states_stack.push_back(state);
-                    states.len() + states_stack.len() - 1
-                }
-            };
-
-            if symbols.non_terminals.contains(symbol) {
-                new_actions.insert(symbol, Action::Goto(index));
-            } else {
-                new_actions.insert(symbol, Action::Shift(index));
-            }
-            
-            // if let (Some(&last_yytable), Some(&last_yycheck)) = (yytable.last(), yycheck.last()) {
-            //     if last_yytable != index as isize || last_yycheck != current_status_index {
-            //         yytable.push(index as isize);
-            //         yycheck.push(current_status_index);
-            //     }
-            // }
-
-            yytable.push(index as isize);
-            yycheck.push(current_state_index);
-        }
-
-        actions.push(new_actions);
+        new_states
     }
 
-    print_states(&states);
-    print_actions(&actions);
+    fn actions<'a>(&self, set: &BTreeSet<Item<'a>>) {
+        for item in set {
 
-    println!("{:?}", yyr1);
-    println!("{:?}", yyr2);
-    println!("{:?} len: {}", yytable, yytable.len());
-    println!("{:?} len: {}", yycheck, yycheck.len());
+        }
+    }
 }
+
+#[derive(Debug)]
+struct Tables {
+    yyr1: Vec<usize>,
+    yyr2: Vec<usize>,
+    yytable: Vec<isize>,
+}
+
+impl Tables {
+    fn print(&self) {
+        println!("yyr1: {:?}", self.yyr1);
+        println!("yyr2: {:?}", self.yyr2);
+    }
+}
+
+
+fn build_tables(grammar: Grammar) -> Tables {
+    let mut tables = Tables {
+        yyr1: Vec::new(),
+        yyr2: Vec::new(),
+        yytable: Vec::new(),
+    };
+
+    tables.yyr1.reserve(grammar.rules_number);
+    tables.yyr2.reserve(grammar.rules_number);
+
+    for (&lhs, rules) in &grammar.rules {
+        for rule in rules {
+            tables.yyr1.push(lhs);
+            tables.yyr2.push(rule.rhs.len());
+        }
+    }
+
+    let mut states: HashMap<BTreeSet<Item>, usize> = HashMap::new();
+    let mut states_stack: Vec<BTreeSet<Item>> = Vec::new(); // State { BtreeSet<Item>, index } ?
+    while let Some(set) = states_stack.pop() {
+        let state_number = states.len();
+        let new_states = grammar.successors(&set);
+        if !states.contains_key(&set) {
+            states.insert(set, state_number);
+        }
+        
+        for new_state in new_states {
+
+        }
+    }
+
+    tables
+}
+
+fn parse_arrow(chars: &mut Peekable<Chars>) -> bool {
+    let mut arrow = false;
+    while let Some(ch) = chars.next() {
+        if ch.is_ascii_whitespace() {
+            if arrow {
+                return true;
+            }
+        } else if ch == '>' {
+            arrow = true;
+        }
+    }
+
+    false
+}
+
+fn main() {
+    println!("lr 1 generator");
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 2 {
+        println!("usage: {} <grammar>", args[0]);
+        return;
+    }
+
+    let lines = match File::open(&args[1]) {
+        Ok(file) => BufReader::new(file).lines(),
+        Err(_) => {
+            eprintln!("error: no file {}", args[1]);
+            return;
+        }
+    };
+
+    let grammar = match Grammar::new(lines) {
+        Ok(grammar) => grammar,
+        Err(_) => return,
+    };
+
+    let tables = build_tables(grammar);
+    tables.print();
+}
+
+// fn main() {
+//     while let Some(state) = states_stack.pop_front() {
+//         let current_state_index = states.len();
+//
+//         // create new states (not completed states)
+//         let mut new_states: HashMap<&str, BTreeSet<Set>> = HashMap::new();
+//         for item in &state {
+//             let next_symbol = match item.derivation.get(item.position) {
+//                 Some(symbol) => symbol,
+//                 None => continue,
+//             };
+//
+//             let new_item = item.advanced();
+//
+//             if let Some(new_state) = new_states.get_mut(next_symbol) {
+//                 new_state.insert(new_item);
+//             } else {
+//                 let new_state = BTreeSet::from([new_item]);
+//                 new_states.insert(next_symbol, new_state);
+//             }
+//
+//             // else {
+//             //     start_item.position = start_item.derivation.len();
+//             //     if state.contains(&start_item) && item.lookahead == "$" {
+//             //         new_actions.insert(item.lookahead, Action::Accept);
+//             //         yytable.push(0);
+//             //         yycheck.push(current_state_index);
+//             //     } else {
+//             //         new_actions.insert(item.lookahead, Action::Reduce(item.rule));
+//             //         if let (Some(&last_yytable), Some(&last_yycheck)) = (yytable.last(), yycheck.last()) {
+//             //             if last_yytable != -(item.rule as isize) || last_yycheck != current_state_index {
+//             //                 yytable.push(-(item.rule as isize));
+//             //                 yycheck.push(current_state_index);
+//             //             }
+//             //         }
+//             //     }
+//             //
+//             // }
+//         }
+//
+//         // insert the current state
+//         if !states.contains_key(&state) {
+//             states.insert(state, current_state_index);
+//         }
+//
+//         // create new actions
+//         let mut new_actions: HashMap<&str, Action> = HashMap::new();
+//         for (symbol, mut state) in new_states {
+//             state = close_items(state, &symbols, &grammar);
+//
+//             let index = match states.get(&state) {
+//                 Some(existing_state) => *existing_state,
+//                 None => {
+//                     states_stack.push_back(state);
+//                     states.len() + states_stack.len() - 1
+//                 }
+//             };
+//
+//             if symbols.non_terminals.contains(symbol) {
+//                 new_actions.insert(symbol, Action::Goto(index));
+//             } else {
+//                 new_actions.insert(symbol, Action::Shift(index));
+//             }
+//
+//             // if let (Some(&last_yytable), Some(&last_yycheck)) = (yytable.last(), yycheck.last()) {
+//             //     if last_yytable != index as isize || last_yycheck != current_status_index {
+//             //         yytable.push(index as isize);
+//             //         yycheck.push(current_status_index);
+//             //     }
+//             // }
+//
+//             yytable.push(index as isize);
+//             yycheck.push(current_state_index);
+//         }
+//
+//         actions.push(new_actions);
+//     }
+// }

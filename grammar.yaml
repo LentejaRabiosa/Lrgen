@@ -1,8 +1,0 @@
-start: 'EXPRESSION'
-
-rules:
-  EXPRESSION:
-    - ['EXPRESSION', 'plus', 'TERM']
-    - ['TERM']
-  TERM:
-    - ['number']
