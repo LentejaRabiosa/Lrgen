@@ -1,3 +1,8 @@
-EXPRESSION > EXPRESSION plus TERM
-EXPRESSION > TERM
-TERM > number
+// explicit terminals declaration will make it possible to have two separate
+// collections of symbols
+plus
+number
+
+EXPRESSION -> EXPRESSION plus TERM
+EXPRESSION -> TERM
+TERM -> number
